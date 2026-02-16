@@ -138,35 +138,41 @@ threading.Thread(target=verificar_pagamentos, daemon=True).start()
 
 # ================== 5SIM ==================
 def comprar_numero():
-    r = requests.get(
-        "https://5sim.net/v1/user/buy/activation",
-        headers={"Authorization": f"Bearer {SIMS_API_KEY}"},
-        params={"country": "br", "operator": "any", "product": "telegram"}
-    )
-    return r.json() if r.status_code == 200 else None
+    try:
+        url = "https://5sim.net/v1/user/buy/activation"
 
-@bot.message_handler(func=lambda m: m.text == "📱 Comprar Número")
-def comprar(msg):
-    saldo = get_saldo(msg.from_user.id)
-    if saldo < 5:
-        bot.send_message(msg.chat.id, "❌ Saldo insuficiente.", reply_markup=menu())
-        return
+        headers = {
+            "Authorization": f"Bearer {SIMS_API_KEY}",
+            "Accept": "application/json"
+        }
 
-    numero = comprar_numero()
-    if not numero:
-        bot.send_message(msg.chat.id, "❌ Erro na 5sim.")
-        return
+        params = {
+            "country": "brazil",
+            "operator": "any",
+            "product": "telegram"
+        }
 
-    cursor.execute("UPDATE users SET saldo = saldo - 5 WHERE user_id=?", (msg.from_user.id,))
-    conn.commit()
+        r = requests.get(url, headers=headers, params=params, timeout=30)
 
-    bot.send_message(
-        msg.chat.id,
-        f"📱 *Número comprado*\n\n{numero['phone']}\nID: {numero['id']}",
-        parse_mode="Markdown",
-        reply_markup=menu()
-    )
+        print("📡 5sim status:", r.status_code)
+        print("📡 5sim resposta:", r.text)
 
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        if "phone" not in data:
+            return None
+
+        return {
+            "id": data["id"],
+            "phone": data["phone"]
+        }
+
+    except Exception as e:
+        print("❌ Erro 5sim:", e)
+        return None
 # ================== AFILIADOS ==================
 @bot.message_handler(func=lambda m: m.text == "🤝 Afiliados")
 def afiliados(msg):
