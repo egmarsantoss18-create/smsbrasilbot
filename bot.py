@@ -183,5 +183,16 @@ def voltar(call):
     bot.send_message(call.message.chat.id, "Menu principal:", reply_markup=menu())
 
 # ================== START BOT ==================
-print("🤖 Bot SMS Brasil iniciado")
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("🤖 Bot SMS Brasil iniciado (Railway)")
+
+    while True:
+        try:
+            bot.infinity_polling(
+                timeout=60,
+                long_polling_timeout=60,
+                skip_pending=True
+            )
+        except Exception as e:
+            print("⚠️ Erro no polling, reiniciando em 5s:", e)
+            time.sleep(5)
