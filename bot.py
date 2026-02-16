@@ -1,187 +1,187 @@
+import telebot
+from telebot import types
+import mercadopago
+import requests
+import sqlite3
 import os
+import base64
 import time
 import threading
-import mercadopago
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# =============================
-# VARIÁVEIS DE AMBIENTE
-# =============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN")
-SIM5_API_KEY = os.getenv("SIM5_API_KEY")
+MP_TOKEN = os.getenv("MP_ACCESS_TOKEN")
+SIMS_API_KEY = os.getenv("SIMS_API_KEY")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-mp = mercadopago.SDK(MP_ACCESS_TOKEN)
 
-# =============================
-# DADOS EM MEMÓRIA (simples)
-# =============================
-users = {}
-payments = {}
+sdk = mercadopago.SDK(MP_TOKEN)
 
-# =============================
-# FUNÇÕES AUXILIARES
-# =============================
+# ================== BANCO ==================
+conn = sqlite3.connect("db.sqlite", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    saldo REAL DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pagamentos (
+    payment_id INTEGER,
+    user_id INTEGER,
+    valor REAL,
+    confirmado INTEGER DEFAULT 0
+)
+""")
+conn.commit()
+
 def get_user(user_id):
-    if user_id not in users:
-        users[user_id] = {
-            "saldo": 0.0,
-            "ref": None,
-            "ganhos_ref": 0.0
-        }
-    return users[user_id]
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
 
-def menu_principal():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("💰 Saldo", callback_data="saldo"),
-        InlineKeyboardButton("💳 Recarregar", callback_data="recarregar"),
-        InlineKeyboardButton("📱 Comprar Número", callback_data="comprar"),
-        InlineKeyboardButton("🤝 Afiliados", callback_data="afiliados"),
-    )
+def get_saldo(user_id):
+    cursor.execute("SELECT saldo FROM users WHERE user_id=?", (user_id,))
+    return cursor.fetchone()[0]
+
+# ================== MENU ==================
+def menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("💰 Saldo", "💳 Recarregar")
+    kb.row("📱 Comprar Número", "🤝 Afiliados")
     return kb
 
-# =============================
-# START
-# =============================
 @bot.message_handler(commands=["start"])
 def start(msg):
-    user = get_user(msg.from_user.id)
-
-    if " " in msg.text:
-        ref = msg.text.split(" ")[1]
-        if ref.isdigit() and int(ref) != msg.from_user.id:
-            user["ref"] = int(ref)
-
+    get_user(msg.from_user.id)
     bot.send_message(
         msg.chat.id,
         "🤖 *SmsBrasilBot*\n\nEscolha uma opção:",
-        reply_markup=menu_principal(),
+        reply_markup=menu(),
         parse_mode="Markdown"
     )
 
-# =============================
-# CALLBACKS
-# =============================
-@bot.callback_query_handler(func=lambda c: True)
-def callbacks(call):
-    user = get_user(call.from_user.id)
+# ================== SALDO ==================
+@bot.message_handler(func=lambda m: m.text == "💰 Saldo")
+def saldo(msg):
+    s = get_saldo(msg.from_user.id)
+    bot.send_message(msg.chat.id, f"💰 Seu saldo: R$ {s:.2f}", reply_markup=menu())
 
-    if call.data == "menu":
-        bot.edit_message_text(
-            "🏠 Menu principal:",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=menu_principal()
-        )
+# ================== RECARGA ==================
+@bot.message_handler(func=lambda m: m.text == "💳 Recarregar")
+def recarregar(msg):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("R$ 10", callback_data="pix_10"),
+        types.InlineKeyboardButton("R$ 20", callback_data="pix_20"),
+        types.InlineKeyboardButton("R$ 50", callback_data="pix_50"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Voltar", callback_data="voltar"))
+    bot.send_message(msg.chat.id, "Escolha o valor da recarga:", reply_markup=kb)
 
-    elif call.data == "saldo":
-        bot.edit_message_text(
-            f"💰 *Seu saldo:* R$ {user['saldo']:.2f}",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("⬅ Voltar", callback_data="menu")
-            ),
-            parse_mode="Markdown"
-        )
+# ================== PIX ==================
+def criar_pix(valor, user_id):
+    p = sdk.payment().create({
+        "transaction_amount": float(valor),
+        "description": f"Recarga SmsBrasilBot {user_id}",
+        "payment_method_id": "pix",
+        "payer": {"email": f"user{user_id}@smsbrasil.bot"}
+    })
 
-    elif call.data == "recarregar":
-        kb = InlineKeyboardMarkup()
-        kb.add(
-            InlineKeyboardButton("R$ 10", callback_data="pix_10"),
-            InlineKeyboardButton("R$ 20", callback_data="pix_20"),
-            InlineKeyboardButton("R$ 50", callback_data="pix_50"),
-        )
-        kb.add(InlineKeyboardButton("⬅ Voltar", callback_data="menu"))
+    if p["status"] != 201:
+        return None
 
-        bot.edit_message_text(
-            "💳 *Escolha o valor da recarga:*",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
+    r = p["response"]
+    cursor.execute(
+        "INSERT INTO pagamentos (payment_id, user_id, valor) VALUES (?, ?, ?)",
+        (r["id"], user_id, valor)
+    )
+    conn.commit()
 
-    elif call.data.startswith("pix_"):
-        valor = float(call.data.split("_")[1])
+    return {
+        "id": r["id"],
+        "qr": r["point_of_interaction"]["transaction_data"]["qr_code"],
+        "img": r["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+    }
 
-        preference = {
-            "items": [{
-                "title": "Recarga SmsBrasilBot",
-                "quantity": 1,
-                "unit_price": valor
-            }],
-            "payment_methods": {
-                "excluded_payment_types": [{"id": "ticket"}],
-                "installments": 1
-            }
-        }
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pix_"))
+def pix_handler(call):
+    valor = int(call.data.split("_")[1])
+    pix = criar_pix(valor, call.from_user.id)
 
-        pref = mp.preference().create(preference)
-        pref_id = pref["response"]["id"]
+    if not pix:
+        bot.send_message(call.message.chat.id, "❌ Erro ao gerar Pix.")
+        return
 
-        payments[pref_id] = {
-            "user_id": call.from_user.id,
-            "valor": valor
-        }
+    bot.send_photo(
+        call.message.chat.id,
+        photo=base64.b64decode(pix["img"]),
+        caption=f"💳 *Pix R$ {valor},00*\n\n`{pix['qr']}`",
+        parse_mode="Markdown"
+    )
 
-        bot.send_message(
-            call.message.chat.id,
-            f"💳 *Pague o Pix abaixo:*\n\n{pref['response']['init_point']}\n\n⏳ Aguardando pagamento...",
-            parse_mode="Markdown"
-        )
-
-    elif call.data == "afiliados":
-        bot.edit_message_text(
-            f"🤝 *Programa de Afiliados*\n\n"
-            f"• Comissão: 10%\n"
-            f"• Seu link:\n"
-            f"https://t.me/{bot.get_me().username}?start={call.from_user.id}",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("⬅ Voltar", callback_data="menu")
-            ),
-            parse_mode="Markdown"
-        )
-
-    elif call.data == "comprar":
-        bot.edit_message_text(
-            "📱 *Compra de número*\n\n⚠ Em breve: integração 5sim ativa.",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("⬅ Voltar", callback_data="menu")
-            ),
-            parse_mode="Markdown"
-        )
-
-# =============================
-# VERIFICADOR DE PAGAMENTO
-# =============================
+# ================== CONFIRMAÇÃO AUTOMÁTICA ==================
 def verificar_pagamentos():
     while True:
-        for pref_id, data in list(payments.items()):
-            payment = mp.preference().get(pref_id)
-            status = payment["response"]["items"][0]["title"]
-
-            if payment["response"]["status"] == "approved":
-                user = get_user(data["user_id"])
-                user["saldo"] += data["valor"]
-
-                if user["ref"]:
-                    ref_user = get_user(user["ref"])
-                    ref_user["saldo"] += data["valor"] * 0.10
-
-                del payments[pref_id]
-
+        cursor.execute("SELECT payment_id, user_id, valor FROM pagamentos WHERE confirmado=0")
+        for pid, uid, valor in cursor.fetchall():
+            p = sdk.payment().get(pid)
+            if p["response"]["status"] == "approved":
+                cursor.execute("UPDATE users SET saldo = saldo + ? WHERE user_id=?", (valor, uid))
+                cursor.execute("UPDATE pagamentos SET confirmado=1 WHERE payment_id=?", (pid,))
+                conn.commit()
+                bot.send_message(uid, f"✅ Pagamento confirmado!\n💰 Saldo atualizado: R$ {get_saldo(uid):.2f}")
         time.sleep(10)
 
-# =============================
-# START BOT
-# =============================
 threading.Thread(target=verificar_pagamentos, daemon=True).start()
+
+# ================== 5SIM ==================
+def comprar_numero():
+    r = requests.get(
+        "https://5sim.net/v1/user/buy/activation",
+        headers={"Authorization": f"Bearer {SIMS_API_KEY}"},
+        params={"country": "br", "operator": "any", "product": "telegram"}
+    )
+    return r.json() if r.status_code == 200 else None
+
+@bot.message_handler(func=lambda m: m.text == "📱 Comprar Número")
+def comprar(msg):
+    saldo = get_saldo(msg.from_user.id)
+    if saldo < 5:
+        bot.send_message(msg.chat.id, "❌ Saldo insuficiente.", reply_markup=menu())
+        return
+
+    numero = comprar_numero()
+    if not numero:
+        bot.send_message(msg.chat.id, "❌ Erro na 5sim.")
+        return
+
+    cursor.execute("UPDATE users SET saldo = saldo - 5 WHERE user_id=?", (msg.from_user.id,))
+    conn.commit()
+
+    bot.send_message(
+        msg.chat.id,
+        f"📱 *Número comprado*\n\n{numero['phone']}\nID: {numero['id']}",
+        parse_mode="Markdown",
+        reply_markup=menu()
+    )
+
+# ================== AFILIADOS ==================
+@bot.message_handler(func=lambda m: m.text == "🤝 Afiliados")
+def afiliados(msg):
+    bot.send_message(
+        msg.chat.id,
+        f"🤝 *Programa de Afiliados*\n\n🔗 https://t.me/SmsBrasilBot?start={msg.from_user.id}",
+        parse_mode="Markdown",
+        reply_markup=menu()
+    )
+
+# ================== VOLTAR ==================
+@bot.callback_query_handler(func=lambda c: c.data == "voltar")
+def voltar(call):
+    bot.send_message(call.message.chat.id, "Menu principal:", reply_markup=menu())
+
+# ================== START BOT ==================
+print("🤖 Bot SMS Brasil iniciado")
 bot.infinity_polling()
