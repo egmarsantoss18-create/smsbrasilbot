@@ -137,14 +137,32 @@ def verificar_pagamentos():
 threading.Thread(target=verificar_pagamentos, daemon=True).start()
 
 # ================== 5SIM ==================
-def comprar_numero():
-    try:
-        url = "https://5sim.net/v1/user/buy/activation"
+def listar_produtos_5sim():
+    url = "https://5sim.net/v1/guest/products/brazil"
+    r = requests.get(url, timeout=30)
 
+    print("📦 Produtos 5sim:", r.text)
+
+    if r.status_code != 200:
+        return {}
+
+    return r.json()
+    
+    def comprar_numero():
+    try:
         headers = {
             "Authorization": f"Bearer {SIMS_API_KEY}",
             "Accept": "application/json"
         }
+
+        # ⚠️ VER PRODUTOS DISPONÍVEIS
+        produtos = listar_produtos_5sim()
+
+        if "telegram" not in produtos:
+            print("❌ Telegram não disponível na 5sim para BR")
+            return None
+
+        url = "https://5sim.net/v1/user/buy/activation"
 
         params = {
             "country": "brazil",
@@ -154,8 +172,8 @@ def comprar_numero():
 
         r = requests.get(url, headers=headers, params=params, timeout=30)
 
-        print("📡 5sim status:", r.status_code)
-        print("📡 5sim resposta:", r.text)
+        print("📡 STATUS 5sim:", r.status_code)
+        print("📡 RESPOSTA 5sim:", r.text)
 
         if r.status_code != 200:
             return None
@@ -171,7 +189,7 @@ def comprar_numero():
         }
 
     except Exception as e:
-        print("❌ Erro 5sim:", e)
+        print("❌ EXCEÇÃO 5sim:", e)
         return None
 # ================== AFILIADOS ==================
 @bot.message_handler(func=lambda m: m.text == "🤝 Afiliados")
